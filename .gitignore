@@ -1,2 +1,4 @@
-.pt
-../checkpoints
+*.pt
+./checkpoints
+*.pyc
+__pycache__

@@ -15,7 +15,10 @@ arg_parser.add_argument('--gpu', type=str, default='0')
 arg_parser.add_argument('--model', type=str, default="wideresnet")
 arg_parser.add_argument('--batch-size', type=int, default=128)
 arg_parser.add_argument('--epochs', type=int, default=200)
-arg_parser.add_argument('--lr', default=0.1, type=float, help='learning_rate')
+arg_parser.add_argument('--only-eval',action="store_true")
+arg_parser.add_argument('--ckpt-path', type=str)
+
+#arg_parser.add_argument('--lr', default=0.1, type=float, help='learning_rate')
 
 args = arg_parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -52,7 +55,7 @@ transform_train = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     #transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-]) # meanstd transformation
+]) 
 
 transform_test = transforms.Compose([
     transforms.ToTensor(),
@@ -103,7 +106,7 @@ def train(model, epoch, trainloader, trainset, criterion):
 
 
 
-def eval(model, epoch, testloader, criterion):
+def eval(model, epoch, testloader, criterion, only_eval=False):
     global best_acc
     model.eval()
     model.training = False
@@ -128,7 +131,7 @@ def eval(model, epoch, testloader, criterion):
         acc = 100.*correct/total
         tqdm.write("\n| Validation Epoch #%d\t\t\tLoss: %.4f Acc@1: %.2f%%" %(epoch, loss.item(), acc))
 
-        if acc > best_acc: # save best accuracy model
+        if (not only_eval) and (acc > best_acc): # save best accuracy model
             tqdm.write('| Saving Best model...\t\t\tTop1 = %.2f%%' %(acc))
             if not os.path.isdir('checkpoint'):
                 os.mkdir('checkpoint')
@@ -159,10 +162,14 @@ def main():
     else: # model == wideresnet28-10
         model = wrn28_10_cifar10_two()
     model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
 
+    if args.only_eval:
+        model.load_state_dict(torch.load(args.ckpt_path))
+        eval(model, 1, testloader, criterion, args.only_eval)
+        return
 
     # training model
-    criterion = nn.CrossEntropyLoss()
     tqdm.write('\nTraining model')
     tqdm.write('| Training Epochs = ' + str(num_epochs))
     tqdm.write('| Initial Learning Rate = ' + str(args.lr))
