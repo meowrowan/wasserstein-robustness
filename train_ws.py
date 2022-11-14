@@ -4,23 +4,31 @@ Wasserstein Distance Guided Representation Learning, Shen et al. (2017)
 """
 import argparse
 import os
+import csv
 
 arg_parser = argparse.ArgumentParser(description='Domain adaptation using WDGRL')
-arg_parser.add_argument('MODEL_FILE', help='A model in trained_models')
-arg_parser.add_argument('--batch-size', type=int, default=64)
+arg_parser.add_argument('--batch-size', type=int, default=128)
 arg_parser.add_argument('--iterations', type=int, default=500)
-arg_parser.add_argument('--epochs', type=int, default=5)
 arg_parser.add_argument('--k-critic', type=int, default=5)
 arg_parser.add_argument('--k-clf', type=int, default=1)
 arg_parser.add_argument('--gamma', type=float, default=10)
 arg_parser.add_argument('--wd-clf', type=float, default=1)
+########################
 
 arg_parser.add_argument('--model', type=str, default="wideresnet")
+arg_parser.add_argument('--gpu', type=str, default="0")
+arg_parser.add_argument('--ckpt_path', type=str, default="checkpoint_final")
+arg_parser.add_argument('--epochs', type=int, default=100)
 
+## adversarial training settings
+arg_parser.add_argument('--eps', type=float, default=0.031)
+arg_parser.add_argument('--step_size', type=float, default=0.007)
+arg_parser.add_argument('--steps', type=int, default=10)
 
 args = arg_parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
+# TODO: need modification in other local environments
+MODEL_FILE = '/nfs/home/dain0823/wasserstein/framework/checkpoint'
 
 import torch
 from torch import nn
@@ -30,19 +38,28 @@ from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, ToTensor
 from tqdm import tqdm, trange
 import torchvision.transforms as transforms
+from torch.autograd import Variable
 
 from pytorchmodels.resnet import resnet20_cifar10_two, resnet56_cifar10_two
 from pytorchmodels.wideresnet import wrn28_10_cifar10_two
 
-from utils import loop_iterable, set_requires_grad, GrayscaleToRgb
-
+from utils import loop_iterable, set_requires_grad
+from robust_utils.trades import trades_loss
+from robust_utils.mart import mart_loss
+from robust_utils.utils import generate_perturbed_data
+from test_pgd import pgd_test
 # Data Preparation
-transform_train = transforms.Compose([
+transform_train = Compose([
     transforms.RandomCrop(32, padding=4),
     transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
+    ToTensor(),
     #transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-]) 
+])
+transform_test = Compose([
+    ToTensor(),
+    #transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
+])
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -62,22 +79,29 @@ def gradient_penalty(critic, h_s, h_t):
     return gradient_penalty
 
 
-def main(args):
+
+def main():
     
     tqdm.write("Preparing Model: {}".format(args.model))
     if args.model == "resnet56":
         clf_model = resnet56_cifar10_two()
+        start_dim = 8192
     elif args.model == "resnet20":
         clf_model = resnet20_cifar10_two()
+        start_dim = 8192
     else: # model == wideresnet28-10
         clf_model = wrn28_10_cifar10_two()
     clf_model = clf_model.to(device)
-    clf_model.load_state_dict(torch.load(args.MODEL_FILE))
+    clf_model.load_state_dict(torch.load(MODEL_FILE+'/{}_cifar10_best.pt'.format(args.model)))
 
     feature_extractor = clf_model.feature_extractor
-    discriminator = clf_model.classifier
+    discriminator = clf_model.discriminator
 
     critic = nn.Sequential(
+        nn.Linear(start_dim, 2048), 
+        nn.ReLU(),
+        nn.Linear(2048, 320), 
+        nn.ReLU(),
         nn.Linear(320, 50),
         nn.ReLU(),
         nn.Linear(50, 20),
@@ -85,32 +109,58 @@ def main(args):
         nn.Linear(20, 1)
     ).to(device)
 
+    if not os.path.isdir(args.ckpt_path):
+        os.mkdir(args.ckpt_path)
+
+    file_name = "./" + args.ckpt_path + "/{}_accuracy.csv".format(args.model)
+    f = open(file_name,'a', newline='')   
+    wr = csv.writer(f)
+    wr.writerow(["epoch", "standard_acc", "pgd_acc"])
+
+
     half_batch = args.batch_size // 2
     
     source_set = CIFAR10(root='/dataset/cifar10', train=True, download=True, transform=transform_train)
     source_loader = torch.utils.data.DataLoader(source_set, batch_size=args.batch_size, shuffle=True, num_workers=2)
     
+    test_set = CIFAR10(root='/dataset/cifar10', train=False, download=False, transform=transform_test)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=100, shuffle=False, num_workers=2)
+
     #target_dataset = MNISTM(train=False)
     #target_loader = DataLoader(target_dataset, batch_size=half_batch, drop_last=True,
     #                           shuffle=True, num_workers=0, pin_memory=True)
 
+    # TODO: need hyperparam setting exp
     critic_optim = torch.optim.Adam(critic.parameters(), lr=1e-4)
     clf_optim = torch.optim.Adam(clf_model.parameters(), lr=1e-4)
     clf_criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(1, args.epochs+1):
-        batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
+    best_standard = 0
+    best_robust = 0
+    init_acc, robust_acc = pgd_test(clf_model, len(test_loader.dataset), test_loader)
+    print("Training Starts")
+
+    for epoch in tqdm(range(1, args.epochs+1)):
+        #batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
 
         total_loss = 0
         total_accuracy = 0
-        for _ in trange(args.iterations, leave=False):
-            (source_x, source_y), (target_x, _) = next(batch_iterator)
+        #for _ in trange(args.iterations, leave=False):
+        for batch_idx, (source_x, source_y) in enumerate(source_loader):
+            #(source_x, source_y), (target_x, _) = next(batch_iterator)
+            
             # Train critic
             set_requires_grad(feature_extractor, requires_grad=False)
             set_requires_grad(critic, requires_grad=True)
 
-            source_x, target_x = source_x.to(device), target_x.to(device)
-            source_y = source_y.to(device)
+            #source_x, target_x = source_x.to(device), target_x.to(device)
+            #source_y = source_y.to(device)
+            source_x, source_y = source_x.to(device), source_y.to(device)
+            # make x_adv as target domain
+            x_adv = generate_perturbed_data(clf_model, source_x, source_y, args.step_size, args.eps, args.steps)
+            target_x = Variable(torch.clamp(x_adv, 0.0, 1.0), requires_grad=False)
+
+            target_x = target_x.to(device)
 
             with torch.no_grad():
                 h_s = feature_extractor(source_x).data.view(source_x.shape[0], -1)
@@ -130,25 +180,66 @@ def main(args):
 
                 total_loss += critic_cost.item()
 
+            # TODO: test
+            #tqdm.write("only critic has been trained")
+            #init_acc, robust_acc = pgd_test(clf_model, len(test_loader.dataset), test_loader)
+
+
             # Train classifier
             set_requires_grad(feature_extractor, requires_grad=True)
             set_requires_grad(critic, requires_grad=False)
             for _ in range(args.k_clf):
-                source_features = feature_extractor(source_x).view(source_x.shape[0], -1)
-                target_features = feature_extractor(target_x).view(target_x.shape[0], -1)
+                # TODO: we have supervised target dataset. can we advance the framework by using this label info?
 
-                source_preds = discriminator(source_features)
-                clf_loss = clf_criterion(source_preds, source_y)
+                source_output, source_features = feature_extractor(source_x, out_feature=True)
+                _, target_features = feature_extractor(target_x, out_feature=True)
                 wasserstein_distance = critic(source_features).mean() - critic(target_features).mean()
 
-                loss = clf_loss + args.wd_clf * wasserstein_distance
+                # caution: this CE loss is already implemented in TRADES loss.
+                source_preds = discriminator(source_output)
+                clf_loss = clf_criterion(source_preds, source_y)
+                
+                # TODO: the labels of target - same as source, use in cost func
+                clf_target_loss = mart_loss(clf_model, source_x, source_y,
+                                            clf_optim,
+                                            step_size=args.step_size,
+                                            epsilon=args.eps,
+                                            perturb_steps=args.steps)
+
+
+                loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss
                 clf_optim.zero_grad()
                 loss.backward()
                 clf_optim.step()
+            
+            #tqdm.write("both has been trained")
+            #init_acc, robust_acc = pgd_test(clf_model, len(test_loader.dataset), test_loader)
 
         mean_loss = total_loss / (args.iterations * args.k_critic)
         tqdm.write(f'EPOCH {epoch:03d}: critic_loss={mean_loss:.4f}')
-        torch.save(clf_model.state_dict(), 'trained_models/wdgrl.pt')
+        # TODO: if you want to test at different eps settings, you have to modify test_pgd also.
+        # TODO: modify autoattack settings if you want above modification
+        init_acc, robust_acc = pgd_test(clf_model, len(test_loader.dataset), test_loader)
+
+        # save current best model (standard & robust )
+        # standard
+        if(robust_acc > 60) and (init_acc > best_standard): # save best accuracy model
+            tqdm.write('| Saving Standard Best model...\t\t\tTop1 = %.2f%%' %(init_acc))
+            torch.save(clf_model.state_dict(),
+                       os.path.join('./'+args.ckpt_path+'/', args.model+"_standard_best.pt"))
+            best_standard = init_acc
+        
+        # robust_acc
+        if(robust_acc > best_robust): # save best accuracy model
+            tqdm.write('| Saving Robust Best model...\t\t\tTop1 = %.2f%%' %(robust_acc))
+            torch.save(clf_model.state_dict(),
+                       os.path.join('./checkpoint_final/', args.model+"_robust_best.pt"))
+            best_robust = robust_acc
+        #torch.save(clf_model.state_dict(), './checkpoint_final/ws_final_{}.pt'.format(args.model))
+        wr.writerow([epoch, init_acc, robust_acc])
+    f.close()
+
+
 
 
 if __name__ == '__main__':

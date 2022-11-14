@@ -211,7 +211,11 @@ class SeparatedCIFARResNet_F(nn.Module):
         x = self.init_block(x)
         x = self.stage1(x)
         x = self.stage2(x)
-        return x
+        feature = x.view(x.size(0), -1)
+        if out_feature == False:
+            return x
+        else:
+            return x, feature
 
 
 class SeparatedCIFARResNet_D(nn.Module):

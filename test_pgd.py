@@ -4,30 +4,14 @@ import torchattacks
 import torch
 import torchvision
 from torchvision import datasets, transforms
+from tqdm import tqdm
 
 from pytorchmodels.resnet import resnet20_cifar10_two, resnet56_cifar10_two
 from pytorchmodels.wideresnet import wrn28_10_cifar10_two
 
-parser = argparse.ArgumentParser(description='TEST for PGD')                  
-parser.add_argument('--gpu', type=str, default="0",
-                    help='gpu_num')
-parser.add_argument('--model', type=str, default="wideresnet")
-parser.add_argument('--ckpt-path', type=str)
+__all__ = ['pgd_test']
 
-args = parser.parse_args()
-
-# settings
-os.environ["CUDA_VISIBLE_DEVICES"]=args.gpu
-model_dir = args.model_dir
-torch.manual_seed(args.seed)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-kwargs = {'num_workers': 1, 'pin_memory': True} if torch.cuda.is_available() else {}
-
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-])
-
-def test_pgd(model, test_len, test_loader):
+def pgd_test(model, test_len, test_loader):
 	"""
 	test robustness
 	# sanity checked: returns the same std. accuracy as original test code
@@ -73,10 +57,29 @@ def test_pgd(model, test_len, test_loader):
 	init_acc = tot_init_correct / float(test_len) * 100.0
 	attack_acc = tot_attack_correct / float(test_len) * 100.0
 
-	print(
-		"network: [acc: %.4f%%] [robust acc: %.4f%%]"
+	tqdm.write(
+		"PGD test >> network: [acc: %.4f%%] [robust acc: %.4f%%]"
 		% (init_acc, attack_acc)
 	)
+	return init_acc, attack_acc
+
+parser = argparse.ArgumentParser(description='TEST for PGD')                  
+parser.add_argument('--gpu', type=str, default="0",
+                    help='gpu_num')
+parser.add_argument('--model', type=str, default="wideresnet")
+parser.add_argument('--ckpt-path', type=str)
+
+args = parser.parse_args()
+
+# settings
+os.environ["CUDA_VISIBLE_DEVICES"]=args.gpu
+torch.manual_seed(57)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+kwargs = {'num_workers': 1, 'pin_memory': True} if torch.cuda.is_available() else {}
+
+transform_test = transforms.Compose([
+    transforms.ToTensor(),
+])
 
 def main():
     if args.model == "resnet56":
@@ -93,4 +96,4 @@ def main():
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=args.test_batch_size, shuffle=False, **kwargs)
     
     model = model.to(device)
-    test_pgd(model, len(test_loader.dataset), test_loader) 
+    init_acc, robust_acc = pgd_test(model, len(test_loader.dataset), test_loader) 

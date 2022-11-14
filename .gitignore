@@ -1,4 +1,5 @@
 *.pt
-./checkpoints
+checkpoint/
+checkpoint_final/
 *.pyc
-__pycache__
+__pycache__/
