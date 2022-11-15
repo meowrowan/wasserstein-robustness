@@ -2,6 +2,13 @@
 Implements WDGRL:
 Wasserstein Distance Guided Representation Learning, Shen et al. (2017)
 """
+
+"""
+this file is to validate that framework is same as MART when wd_clf = 0
+if not reproduced, change the optimizer to SGD, or move zero-grad before calculating loss
+
+sanity-checked. code is good.
+"""
 import argparse
 import os
 import csv
@@ -12,21 +19,28 @@ arg_parser.add_argument('--iterations', type=int, default=500)
 arg_parser.add_argument('--k-critic', type=int, default=5)
 arg_parser.add_argument('--k-clf', type=int, default=1)
 arg_parser.add_argument('--gamma', type=float, default=10)
-arg_parser.add_argument('--wd-clf', type=float, default=1)
 ########################
-
 arg_parser.add_argument('--model', type=str, default="wideresnet")
 arg_parser.add_argument('--gpu', type=str, default="0")
-arg_parser.add_argument('--ckpt_path', type=str, default="checkpoint_final")
+arg_parser.add_argument('--ckpt-path', type=str, default="checkpoint_final")
+arg_parser.add_argument('--wd-clf', type=float, default=0)
 arg_parser.add_argument('--epochs', type=int, default=100)
-
 ## adversarial training settings
 arg_parser.add_argument('--eps', type=float, default=0.031)
-arg_parser.add_argument('--step_size', type=float, default=0.007)
+arg_parser.add_argument('--step-size', type=float, default=0.007)
 arg_parser.add_argument('--steps', type=int, default=10)
+## optim settings
+arg_parser.add_argument('--weight-decay', '--wd', default=3.5e-3,
+                    type=float, metavar='W')
+arg_parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+                    help='learning rate')
+arg_parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
+                    help='SGD momentum')
 
 args = arg_parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+
 # TODO: need modification in other local environments
 MODEL_FILE = '/nfs/home/dain0823/wasserstein/framework/checkpoint'
 
@@ -47,7 +61,10 @@ from utils import loop_iterable, set_requires_grad
 from robust_utils.trades import trades_loss
 from robust_utils.mart import mart_loss
 from robust_utils.utils import generate_perturbed_data
-from test_pgd import pgd_test
+from pgd_function import pgd_test
+
+torch.manual_seed(1)
+
 # Data Preparation
 transform_train = Compose([
     transforms.RandomCrop(32, padding=4),
@@ -78,7 +95,17 @@ def gradient_penalty(critic, h_s, h_t):
     gradient_penalty = ((gradient_norm - 1)**2).mean()
     return gradient_penalty
 
-
+def adjust_learning_rate(optimizer, epoch):
+    """decrease the learning rate"""
+    lr = args.lr
+    if epoch >= 100:
+        lr = args.lr * 0.001
+    elif epoch >= 90:
+        lr = args.lr * 0.01
+    elif epoch >= 75:
+        lr = args.lr * 0.1
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
 def main():
     
@@ -91,6 +118,7 @@ def main():
         start_dim = 8192
     else: # model == wideresnet28-10
         clf_model = wrn28_10_cifar10_two()
+        start_dim = 8192
     clf_model = clf_model.to(device)
     clf_model.load_state_dict(torch.load(MODEL_FILE+'/{}_cifar10_best.pt'.format(args.model)))
 
@@ -120,10 +148,10 @@ def main():
 
     half_batch = args.batch_size // 2
     
-    source_set = CIFAR10(root='/dataset/cifar10', train=True, download=True, transform=transform_train)
+    source_set = CIFAR10(root='/datasets/cifar10', train=True, download=True, transform=transform_train)
     source_loader = torch.utils.data.DataLoader(source_set, batch_size=args.batch_size, shuffle=True, num_workers=2)
     
-    test_set = CIFAR10(root='/dataset/cifar10', train=False, download=False, transform=transform_test)
+    test_set = CIFAR10(root='/datasets/cifar10', train=False, download=False, transform=transform_test)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=100, shuffle=False, num_workers=2)
 
     #target_dataset = MNISTM(train=False)
@@ -132,7 +160,8 @@ def main():
 
     # TODO: need hyperparam setting exp
     critic_optim = torch.optim.Adam(critic.parameters(), lr=1e-4)
-    clf_optim = torch.optim.Adam(clf_model.parameters(), lr=1e-4)
+    #clf_optim = torch.optim.Adam(clf_model.parameters(), lr=1e-4)
+    clf_optim = torch.optim.SGD(clf_model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)   
     clf_criterion = nn.CrossEntropyLoss()
 
     best_standard = 0
@@ -142,6 +171,7 @@ def main():
 
     for epoch in tqdm(range(1, args.epochs+1)):
         #batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
+        adjust_learning_rate(clf_optim, epoch)
 
         total_loss = 0
         total_accuracy = 0
@@ -150,6 +180,7 @@ def main():
             #(source_x, source_y), (target_x, _) = next(batch_iterator)
             
             # Train critic
+            clf_model.eval()
             set_requires_grad(feature_extractor, requires_grad=False)
             set_requires_grad(critic, requires_grad=True)
 
@@ -186,6 +217,7 @@ def main():
 
 
             # Train classifier
+            clf_model.train()
             set_requires_grad(feature_extractor, requires_grad=True)
             set_requires_grad(critic, requires_grad=False)
             for _ in range(args.k_clf):
@@ -196,18 +228,21 @@ def main():
                 wasserstein_distance = critic(source_features).mean() - critic(target_features).mean()
 
                 # caution: this CE loss is already implemented in TRADES loss.
-                source_preds = discriminator(source_output)
-                clf_loss = clf_criterion(source_preds, source_y)
+                #source_preds = discriminator(source_output)
+                #clf_loss = clf_criterion(source_preds, source_y)
                 
                 # TODO: the labels of target - same as source, use in cost func
                 clf_target_loss = mart_loss(clf_model, source_x, source_y,
                                             clf_optim,
                                             step_size=args.step_size,
                                             epsilon=args.eps,
-                                            perturb_steps=args.steps)
+                                            perturb_steps=args.steps,
+                                            beta=5)
 
 
-                loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss
+                #loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss
+                loss = args.wd_clf * wasserstein_distance + clf_target_loss
+                
                 clf_optim.zero_grad()
                 loss.backward()
                 clf_optim.step()
@@ -233,7 +268,7 @@ def main():
         if(robust_acc > best_robust): # save best accuracy model
             tqdm.write('| Saving Robust Best model...\t\t\tTop1 = %.2f%%' %(robust_acc))
             torch.save(clf_model.state_dict(),
-                       os.path.join('./checkpoint_final/', args.model+"_robust_best.pt"))
+                       os.path.join('./'+args.ckpt_path+'/', args.model+"_robust_best.pt"))
             best_robust = robust_acc
         #torch.save(clf_model.state_dict(), './checkpoint_final/ws_final_{}.pt'.format(args.model))
         wr.writerow([epoch, init_acc, robust_acc])

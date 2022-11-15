@@ -3,3 +3,4 @@ checkpoint/
 checkpoint_final/
 *.pyc
 __pycache__/
+checkpoint_*/
