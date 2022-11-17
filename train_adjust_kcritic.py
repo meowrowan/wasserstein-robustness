@@ -106,9 +106,9 @@ def adjust_learning_rate(optimizer, epoch):
 
 def adjust_k_critic(epoch):
     """increase critic iteration"""
-    k = 1
+    k = 5
     if epoch >= 60:
-        k = 5
+        k = 1
     elif epoch >= 30:
         k = 3
     return k

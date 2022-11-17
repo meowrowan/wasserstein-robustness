@@ -17,7 +17,6 @@ arg_parser.add_argument('--model', type=str, default="wideresnet")
 arg_parser.add_argument('--gpu', type=str, default="0")
 arg_parser.add_argument('--ckpt-path', type=str, default="checkpoint_final")
 arg_parser.add_argument('--wd-clf', type=float, default=0.001)
-arg_parser.add_argument('--l2-clf', type=float, default=0.1)
 arg_parser.add_argument('--epochs', type=int, default=120)
 ## adversarial training settings
 arg_parser.add_argument('--eps', type=float, default=0.031)
@@ -34,8 +33,6 @@ arg_parser.add_argument('--trades', action="store_true")
 arg_parser.add_argument('--mart', action="store_true")
 
 ## loss settings
-
-
 args = arg_parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
@@ -109,11 +106,18 @@ def adjust_learning_rate(optimizer, epoch):
 
 def adjust_k_critic(epoch):
     """increase critic iteration"""
+    k = 1
     if epoch >= 60:
         k = 5
     elif epoch >= 30:
         k = 3
     return k
+
+def adjust_wd_clf(epoch):
+    wd_clf = 0.0001
+    if epoch >= 0.5 * args.epochs:
+        wd_clf = 0.001
+    return wd_clf
 
 
 def main():
@@ -182,6 +186,7 @@ def main():
         #batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
         adjust_learning_rate(clf_optim, epoch)
         #args.k_critic = adjust_k_critic(epoch)
+        args.wd_clf = adjust_wd_clf(epoch)
 
         total_loss = 0
         total_accuracy = 0
@@ -242,9 +247,7 @@ def main():
                 #print(source_preds.size())
                 #print(source_y.size())
 
-                # SE loss
-                # clf_loss = torch.sum((F.softmax(source_preds, dim=1) - F.one_hot(source_y)) ** 2, dim=-1).mean()
-                clf_loss = torch.sum((source_preds - F.one_hot(source_y)) ** 2, dim=-1).mean()
+                #clf_loss = torch.sum((source_preds - F.one_hot(source_y)) ** 2, dim=-1).mean()
                 
                 # TODO: the labels of target - same as source, use in cost func
                 if args.mart:
@@ -264,12 +267,12 @@ def main():
                 else:
                     tqdm.write("no loss has been configured. get loss flag")
 
-                #loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss
-                #loss = args.wd_clf * wasserstein_distance + clf_target_loss
+                #loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss                
+                loss = args.wd_clf * wasserstein_distance + clf_target_loss
                 #print(clf_loss.size())
                 #print(clf_target_loss.size())
                 #print(wasserstein_distance.size())
-                loss = args.wd_clf * wasserstein_distance + clf_target_loss + clf_loss * args.l2_clf
+                #loss = args.wd_clf * wasserstein_distance + clf_target_loss + clf_loss
                 
 
                 clf_optim.zero_grad()

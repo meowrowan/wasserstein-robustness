@@ -115,10 +115,8 @@ def adjust_k_critic(epoch):
 
 def adjust_wd_clf(epoch):
     wd_clf = 0.001
-    if epoch >= 0.75 * args.epochs:
-        wd_clf = 0.1
-    elif epoch >= 0.5 * args.epochs:
-        wd_clf = 0.01
+    if epoch >= 0.5 * args.epochs:
+        wd_clf = 0.0001
     return wd_clf
 
 

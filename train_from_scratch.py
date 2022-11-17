@@ -2,6 +2,11 @@
 Implements WDGRL:
 Wasserstein Distance Guided Representation Learning, Shen et al. (2017)
 """
+
+"""
+this file is to validate that framework is same as TRADES when wd_clf = 0
+if not reproduced, change the optimizer to SGD, or move zero-grad before calculating loss
+"""
 import argparse
 import os
 import csv
@@ -16,9 +21,8 @@ arg_parser.add_argument('--gamma', type=float, default=10)
 arg_parser.add_argument('--model', type=str, default="wideresnet")
 arg_parser.add_argument('--gpu', type=str, default="0")
 arg_parser.add_argument('--ckpt-path', type=str, default="checkpoint_final")
-arg_parser.add_argument('--wd-clf', type=float, default=0.001)
-arg_parser.add_argument('--l2-clf', type=float, default=0.1)
-arg_parser.add_argument('--epochs', type=int, default=120)
+arg_parser.add_argument('--wd-clf', type=float, default=0)
+arg_parser.add_argument('--epochs', type=int, default=100)
 ## adversarial training settings
 arg_parser.add_argument('--eps', type=float, default=0.031)
 arg_parser.add_argument('--step-size', type=float, default=0.007)
@@ -30,11 +34,6 @@ arg_parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                     help='learning rate')
 arg_parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                     help='SGD momentum')
-arg_parser.add_argument('--trades', action="store_true")
-arg_parser.add_argument('--mart', action="store_true")
-
-## loss settings
-
 
 args = arg_parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -52,7 +51,6 @@ from torchvision.transforms import Compose, ToTensor
 from tqdm import tqdm, trange
 import torchvision.transforms as transforms
 from torch.autograd import Variable
-import torch.nn.functional as F
 
 from pytorchmodels.resnet import resnet20_cifar10_two, resnet56_cifar10_two
 from pytorchmodels.wideresnet import wrn28_10_cifar10_two
@@ -107,15 +105,6 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def adjust_k_critic(epoch):
-    """increase critic iteration"""
-    if epoch >= 60:
-        k = 5
-    elif epoch >= 30:
-        k = 3
-    return k
-
-
 def main():
     
     tqdm.write("Preparing Model: {}".format(args.model))
@@ -129,7 +118,7 @@ def main():
         clf_model = wrn28_10_cifar10_two()
         start_dim = 8192
     clf_model = clf_model.to(device)
-    clf_model.load_state_dict(torch.load(MODEL_FILE+'/{}_cifar10_best.pt'.format(args.model)))
+    #clf_model.load_state_dict(torch.load(MODEL_FILE+'/{}_cifar10_best.pt'.format(args.model)))
 
     feature_extractor = clf_model.feature_extractor
     discriminator = clf_model.discriminator
@@ -181,7 +170,6 @@ def main():
     for epoch in tqdm(range(1, args.epochs+1)):
         #batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
         adjust_learning_rate(clf_optim, epoch)
-        #args.k_critic = adjust_k_critic(epoch)
 
         total_loss = 0
         total_accuracy = 0
@@ -238,40 +226,21 @@ def main():
                 wasserstein_distance = critic(source_features).mean() - critic(target_features).mean()
 
                 # caution: this CE loss is already implemented in TRADES loss.
-                source_preds = discriminator(source_output)
-                #print(source_preds.size())
-                #print(source_y.size())
-
-                # SE loss
-                # clf_loss = torch.sum((F.softmax(source_preds, dim=1) - F.one_hot(source_y)) ** 2, dim=-1).mean()
-                clf_loss = torch.sum((source_preds - F.one_hot(source_y)) ** 2, dim=-1).mean()
+                #source_preds = discriminator(source_output)
+                #clf_loss = clf_criterion(source_preds, source_y)
                 
                 # TODO: the labels of target - same as source, use in cost func
-                if args.mart:
-                    clf_target_loss = mart_loss(clf_model, source_x, source_y,
-                                                clf_optim,
-                                                step_size=args.step_size,
-                                                epsilon=args.eps,
-                                                perturb_steps=args.steps,
-                                                beta=6)
-                elif args.trades:
-                    clf_target_loss = trades_loss(clf_model, source_x, source_y,
-                                                clf_optim,
-                                                step_size=args.step_size,
-                                                epsilon=args.eps,
-                                                perturb_steps=args.steps,
-                                                beta=6)
-                else:
-                    tqdm.write("no loss has been configured. get loss flag")
+                clf_target_loss = trades_loss(clf_model, source_x, source_y,
+                                            clf_optim,
+                                            step_size=args.step_size,
+                                            epsilon=args.eps,
+                                            perturb_steps=args.steps,
+                                            beta=6)
+
 
                 #loss = clf_loss + args.wd_clf * wasserstein_distance + clf_target_loss
-                #loss = args.wd_clf * wasserstein_distance + clf_target_loss
-                #print(clf_loss.size())
-                #print(clf_target_loss.size())
-                #print(wasserstein_distance.size())
-                loss = args.wd_clf * wasserstein_distance + clf_target_loss + clf_loss * args.l2_clf
+                loss = args.wd_clf * wasserstein_distance + clf_target_loss
                 
-
                 clf_optim.zero_grad()
                 loss.backward()
                 clf_optim.step()
